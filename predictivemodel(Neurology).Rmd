@@ -1,0 +1,934 @@
+---
+title: "Predictive Model"
+output:
+  html_document: default
+  pdf_document: default
+  word_document: default
+---
+
+
+***Files needed to be downloaded in the user's data directory from Box-
+
+1. Staffed Rooms (Room Usage for Neurology,estimated from algo) - Ambulatory/Neurology/staffed.csv
+
+2. Neurology FY17 - Ambulatory/Neurology/Data from CHP/Cadence Data/Neurology FY17.xlsx
+
+3. Distance Matrix-  Ambulatory/Data/swpazctadistance.csv
+
+Note: The chunks of code in segment 1 and segment 2 with heading 'Parametrize here' can be parametrized based on the lookahed days. The current model predicts staffed rooms for 7 days ahead. There are 3 chucks of code with the following heading that can be parametrized. Final model used is GLM with final error, predictions and error plot.
+
+
+
+Change Data Directory Here 
+```{r}
+datadirectory<-"C:/Users/Pranay/Desktop/Hospital"
+```
+
+
+-------------------------------------------------------------------------------------------------
+
+Code Segment 1 
+
+# Purpose
+Estimation of Scheduled Rooms From the Algorithm For Staffed Room Estimation
+
+# Data 
+**Time span:** July 1, 2016 through June 30, 2017\
+**Source:** Cadence data (Epic scheduling + Cerner time stamps)
+
+Use the data on Box (Ambulatory/Neurology/Data from CHP/Cadence Data/Neurology FY17). After receiving the data from CHP, the following changes have been made in the Excel file:
+
+* Row 6617 removed (row is not an appointment)
+* Appt Date (column D): Convert XX to 20XX
+* Appt Length: Convert to Number
+* Cancelled Date (column AK): Convert XX to 20XX
+* Age (column Q): Convert to Number
+* Age of Date of Appt (column T): Convert to Number
+* Zip Code (column AD): Convert to Number
+* Made on Date (column BA): Convert XX to 20XX
+
+```{r message = FALSE, warning = FALSE}
+# load full year data 
+library(readxl)
+datafile<-"Neurology FY17.xlsx"
+fydat<-read_excel(file.path(datadirectory, datafile))
+```
+
+
+# Assumptions
+
+Morning and afternoon appointments are as categorized in the "Morning/Afternoon" column in the cadence data. i.e. if an 11:00 AM patient is not roomed until 12:30, they are still considered a morning patient. Likewise, if an afternoon patient is roomed in the morning, they are still considered an afternoon patient
+
+Every time the session changes, the room count starts again at 0.  If a morning patient is still in the room when an afternoon patient arrives, the morning patient is not included in the room count.
+
+Each patient has his/her own room (no two patients are in the same room at the same time)
+
+Appointment statuses of "Completed", "Arrived", "Unresolved" are included.
+
+Appointment types of "Service", "Research", "Phone Appt" are excluded.
+
+Appointments without rooming forms are excluded.
+
+# Determining Scheduled Rooms
+
+### Loading and preparing data
+
+The code below does the following:
+
+
+* put data into correct format
+* order data, from earliest to latest, by appointment date, then by session within that day (AM/PM), then by time that the patient enters the room (rooming form) within that session
+```{r}
+maxApptLength <- 240
+
+dat <- fydat[fydat$Department == "1034117 - UPA NEURO CHP OP" &
+               (fydat$`Appt Status` == "Completed" | fydat$`Appt Status` == "Canceled"|fydat$`Appt Status` == "No Show"|
+                  fydat$`Appt Status`=="Arrived" | 
+                  fydat$`Appt Status`=="Unresolved") &
+               (fydat$`Appt Type`!="4670 - SERVICE" & 
+                  fydat$`Appt Type`!="4879 - RESEARCH" & 
+                  fydat$`Appt Type`!="5894 - PHONE APPT"),]
+
+library(lubridate)
+table(dat$`Appt Status`)
+
+```
+
+# Dealing with missing values
+
+* If rooming form is not present, patient is not included
+* Depart Summary is replaced with Rooming Form + Scheduled Appointment Length if any of the following are true:
+    + Depart Summary is missing
+    + Depart Summary is earlier than Rooming Form for the appointment
+    + Difference between Depart Summary and Rooming Form for the appointment is greater than 4 hours
+        + Indicates a long appointment duration and thus a questionable Depart Summary
+
+* Add 10 minutes to the depart summary to account for the patient actually leaving the room and the turnaround time before the next patient can enter
+    + Recall that the depart summary is typically 4.4 minutes before the actual patient room departure
+
+    
+* Case 1: Rooming Form is present, Depart Summary is present
+
+```{r echo = FALSE}
+nrow(dat[!is.na(dat$`Rooming Form`) & !is.na(dat$`Depart Summary`),])/nrow(dat)
+```
+* Case 2: Rooming Form is not present, Depart Summary is present
+```{r echo = FALSE}
+nrow(dat[is.na(dat$`Rooming Form`) & !is.na(dat$`Depart Summary`),])/nrow(dat)
+```
+* Case 3: Rooming Form is present, Depart Summary is not present
+```{r echo = FALSE}
+nrow(dat[!is.na(dat$`Rooming Form`) & is.na(dat$`Depart Summary`),])/nrow(dat)
+```
+* Case 4: Rooming Form is not present, Depart Summary is not present
+```{r echo = FALSE}
+nrow(dat[is.na(dat$`Rooming Form`) & is.na(dat$`Depart Summary`),])/nrow(dat)
+```
+
+Check to make sure total is 100%
+```{r echo = FALSE}
+nrow(dat[!is.na(dat$`Rooming Form`) & !is.na(dat$`Depart Summary`),])/nrow(dat) + 
+  nrow(dat[is.na(dat$`Rooming Form`) & !is.na(dat$`Depart Summary`),])/nrow(dat) +
+  nrow(dat[!is.na(dat$`Rooming Form`) & is.na(dat$`Depart Summary`),])/nrow(dat) + 
+  nrow(dat[is.na(dat$`Rooming Form`) & is.na(dat$`Depart Summary`),])/nrow(dat)
+```
+
+If Rooming Form not present, use Check In Time + 30 minutes
+```{r}
+# declare check in to rooming time
+checkInDelay <- 30
+secInMin <- 60
+
+# declare start of appointment
+dat$startOfAppt <- dat$`Rooming Form`
+
+# format check in time to match rooming form
+dat$`Check In Time` <- sub("([0-9])([A-Z])", "\\1 \\2", dat$`Check In Time`)
+dat$`Check In Time` <- as.POSIXct(dat$`Check In Time`, format = "%m/%d/%Y %I:%M %p")
+
+# use check in time when rooming form not available
+for (i in 1:nrow(dat)) {
+  if(is.na(dat$startOfAppt[i])) {
+    dat$startOfAppt[i] <- dat$`Check In Time`[i] + checkInDelay*secInMin
+  }
+}
+```
+
+If Depart Summary is not correct, use rooming form + scheduled appointment length
+```{r}
+# declare max and min appointemnt lengths
+minApptLength <- 0
+maxApptLength <- 240
+
+# declare end of appointment
+dat$endOfAppt <- dat$`Depart Summary`
+
+# find average time in room for different appointment lengths
+# calculate length of stay and only use valid lengths
+dat$LOS <- as.numeric(difftime(dat$endOfAppt, dat$startOfAppt, units = "mins"))
+dat <- dat[(dat$LOS>minApptLength &
+             dat$LOS<maxApptLength)|
+             is.na(dat$LOS),]
+
+
+library(dplyr)
+# declare minimum observances for appointment lengths
+minN <- 50
+
+# find averages for each appointment length
+losAvg <- dat %>% group_by(`Appt Length`) %>%
+  dplyr:: summarise(Mean=round(mean(LOS, na.rm = TRUE)),
+            Stdev=round(sd(LOS, na.rm = TRUE)),
+            n=n())
+losAvg <- losAvg[losAvg$n>=minN & !is.na(losAvg$`Appt Length`),]
+
+# use start of appointment + estimated time in room when depart summary not available
+for (i in 1:nrow(dat)) {
+  if (is.na(dat$endOfAppt[i])&
+      !is.na(dat$startOfAppt[i])) {
+    for (j in 1:nrow(losAvg)) {
+      if (dat$`Appt Length`[i] == losAvg$`Appt Length`[j]) {
+        dat$LOS[i] <- losAvg$Mean[j]
+      }
+    }
+    dat$endOfAppt[i] <- dat$startOfAppt[i] + dat$LOS[i]*secInMin
+  }
+}
+
+# add allowance for end of appointment
+dat$endOfAppt<- dat$endOfAppt + 10*60
+
+losAvg
+```
+
+
+
+#Investigate patients roomed during incorrect session
+
+The algorithm currently does not respond appropriately to the following scenarios:\
+
+
+* An AM patient is roomed in the afternoon
+* An AM patient is still in the room when the afternoon session begins
+* A PM patient is roomed in the morning
+
+In this section we investigate the frequency of occurrence of these scenarios.
+```{r}
+wrong <- dat[(dat$`Morning/Afternoon` == "AM - MORNING" & format(dat$`Rooming Form`, "%H")>12) |
+               (dat$`Morning/Afternoon` == "AM - MORNING" & format(dat$`Depart Summary`, "%H")>12) |
+               (dat$`Morning/Afternoon` == "PM - AFTERNOON" & format(dat$`Depart Summary`, "%H")<12 & !is.na(dat$`Depart Summary`)),]
+
+# percentage of incorrect sessions
+paste(round((nrow(wrong)/nrow(dat))*100, 2), "%", sep = "")
+```
+
+```{r}
+# order data chronologically
+dat <- dat[order(dat$`Appt Date`, dat$`Morning/Afternoon`, dat$startOfAppt),]
+rownames(dat) <- 1:nrow(dat)
+dat$Session <- paste(dat$`Appt Date`, dat$`Morning/Afternoon`)
+```
+
+
+#Determining the actual number of rooms used
+
+1. create a matrix (called "rooms") to store the number of rooms available when each new patient arrives
+    + each column will be a different session 
+    + each row will be a patient arriving during the column's session
+2. go through the cadence data row by row
+    a.  for each row, compare the patient's session to the session in the row above
+    b.  if the patient is in the same session as the patient in the row above, check the new patient's rooming form to all depart summaries for all patients in the same session in the rows above
+          i. count all of the depart summaries (in the same session) that occur after the new patient's rooming form. we can assume that the new patient is entering a room that is not occupied by any of the patients whose depart summaries occur after the new patient's rooming form
+          ii. record the number of rooms that are in use when the patient arrives in the "rooms" matrix
+    c. if the patient's session does not match the session of the patient in the row above, we assume that we have either moved on from morning to afternoon or afternoon to the next morning, so we start the room count over again
+          i. move to the next column in the "rooms" matrix
+          ii. repeat 2bi, 2bii 
+3. find the maximum in each column (session) of the "rooms" matrix
+```{r}
+dat$`Appt Time`<-format(strptime(dat$`Appt Time`, "%I:%M %p"), format="%H:%M:%S")
+dat$New_time<-as.POSIXct(paste(dat$`Appt Date`, dat$`Appt Time`), format="%Y-%m-%d %H:%M")
+#tz(dat$New_time)<-"America/New_York"
+#determine how early they will arrive based on data
+dat$Pre_arrival<-(dat$`Check In Time`-dat$New_time)/60
+dat$`Appt Type`<-as.factor(dat$`Appt Type`)
+l<-lapply(split(dat$Pre_arrival,dat$`Appt Type`),mean)
+#determine how late they will levae after the checking out
+dat$`Check Out Time`<-as.POSIXct(format(strptime(dat$`Check Out Time`,"%m/%d/%Y %I:%M %p"),format="%m/%d/%Y %H:%M"),format="%m/%d/%Y %H:%M")
+#tz(dat$`Check Out Time`)<-"America/New_York"
+#tz(dat$`Depart Summary`)<-"America/New_York"
+dat$post_leave<-(dat$endOfAppt-dat$`Depart Summary`)
+ll<-lapply(split(dat$post_leave,dat$`Appt Type`),mean,na.rm=TRUE)
+
+#arrival before appt
+#$`6 - NEW PATIENT`
+#Time difference of  10.78247mins
+
+#$`7 - RETURN PATIENT`
+#Time difference of 11.72817 mins
+#get when they will levae :avg 10 min
+
+dat<-dat[!is.na(dat$`Appt Length`),]
+for (i in 1:nrow(dat)){
+  if(dat$`Appt Length`[i]==60){dat$startOfAppt[i]=dat$New_time[i]-dminutes(11)
+  dat$endOfAppt[i]=dat$New_time[i]+dminutes(68)
+    
+  }else if(dat$`Appt Length`[i]==45){dat$startOfAppt[i]=dat$New_time[i]-dminutes(11)
+  dat$endOfAppt[i]=dat$New_time[i]+dminutes(75)
+    
+  }else if(dat$`Appt Length`[i]==40){dat$startOfAppt[i]=dat$New_time[i]-dminutes(11)
+  dat$endOfAppt[i]=dat$New_time[i]+dminutes(46)
+    
+  }else if(dat$`Appt Length`[i]==30){dat$startOfAppt[i]=dat$New_time[i]-dminutes(11)
+  dat$endOfAppt[i]=dat$New_time[i]+dminutes(56)
+    
+  }else if(dat$`Appt Length`[i]==20){dat$startOfAppt[i]=dat$New_time[i]-dminutes(11)
+  dat$endOfAppt[i]=dat$New_time[i]+dminutes(39)
+    
+  }
+    
+  }
+  
+
+```
+
+
+
+
+##Parametrize here 
+```{r}
+time_window_Data2<-data.frame()
+#creat 7 days lookaehad
+for (i in 1:nrow(dat)){
+  
+  if (dat$`Appt Date`[i]-dat$`Made On Date`[i]>=7){  #parametrize here for scheduled rooms. Currently 7 days
+    #colnames(time_window_Data)<-colnames(extract_data)
+    time_window_Data2<-rbind(dat[i,],time_window_Data2)
+  }else{
+    time_window_Data2<-time_window_Data2
+  }
+  
+}
+
+dat<-time_window_Data2
+```
+
+
+##Parametrize here 
+```{r}
+#delete the canceled appts if it is cancel before 7 days; if is canceld after, then just keep the records
+dat$`Cancelled Date`<-as.POSIXct(dat$`Cancelled Date`, format = "%m/%d/%y")
+
+cancel_data<-dat[dat$`Appt Status`=="Canceled",]
+cancel_data<-cancel_data[cancel_data$`Appt Date`-cancel_data$`Cancelled Date`>=7,] #parametrize here for appointments cancelled. Currently 7 days
+
+
+dat<-dat[!dat$`Appt Status`=="Canceled",]
+
+
+#combine the cancel data with the dat
+dat<-rbind(cancel_data,dat)
+```
+
+
+```{r}
+dat <- dat[!is.na(dat$startOfAppt) & !is.na(dat$endOfAppt),]
+# order data chronologically
+dat <- dat[order(dat$`Appt Date`, dat$`Morning/Afternoon`, dat$startOfAppt),]
+rownames(dat) <- 1:nrow(dat)
+dat$Session <- paste(dat$`Appt Date`, dat$`Morning/Afternoon`)
+```
+
+```{r warning = FALSE, message = FALSE}
+library(knitr)
+library(plyr)
+q<-as.data.frame(table(dat$`Appt Date`))
+q2<-as.data.frame(table(unique(dat$Session)))
+# columns: sessions, rows: appointments. Note: will be more rows than are actually required
+rooms <- matrix(0, max(q$Freq), sum(q2$Freq))
+colnames(rooms) <- unique(dat$Session)
+
+x <- 1
+m <- 1
+w <- 1
+z <- 2
+for (z in 2:nrow(dat)){
+  if ((dat$`Appt Date`[z] == dat$`Appt Date`[z-1]) & 
+      (dat$`Morning/Afternoon`[z] == dat$`Morning/Afternoon`[z-1])) {
+    ct <- 0
+    for (k in x:z) {
+      if (dat$endOfAppt[k] > dat$startOfAppt[z]) {
+        ct <- ct + 1
+      }
+    }
+    if (k < nrow(dat)) {
+      rooms[m,w] <- ct
+      ct <- 0
+      m <- m + 1
+    }
+  }
+  else if (dat$`Appt Date`[z] != dat$`Appt Date`[z-1] |
+           dat$`Morning/Afternoon`[z] != dat$`Morning/Afternoon`[z-1]) {
+    m <- 1
+    w = w + 1
+    rooms[m,w] <- 1
+    x <- z
+    m <- m + 1
+  }
+}
+
+# count the maximum number of rooms used in each session
+u <- 1
+maxrooms <- matrix(0, ncol(rooms), 1)
+for (v in 1:ncol(rooms)) {
+  maxrooms[u,1] <- max(rooms[,v])
+  u <- u + 1
+}
+maxrooms.df <- data.frame(maxrooms)
+maxrooms.df$Session <- colnames(rooms)
+q3<-as.data.frame(table(dat$Session))
+maxrooms.df$Number.Patients <- q3$Freq
+kable(maxrooms.df[,c(1:2)], format = "markdown")
+```
+ 
+
+
+
+------------------------------------------------------------------------------------------------
+                 
+
+
+
+
+
+
+---------------------------------------------------------------------------------------------
+
+Code Segment 2:
+
+
+title: "Room use predictive model"
+author: Yuefan Huang, Louis Luangkesorn, Kimberley Dickinson, Pranay Mohanty, Anna
+  Svirsko
+date: "December 13, 2017"
+output:
+  html_document: default
+  word_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Abstract
+
+In an outpatient clinic setting where rooms are allocated among several specialty clinics simultaneously, rooms are typically allocated based on the number of providers scheduled and a provider to room ratio. 
+However, being able to predict the daily needs of each clinic based on patient appointments allows for smooth reallocation of rooms from clinics that will not be able to use their base allocation to clinics that need additional space. 
+We first use electronic medical records to estimate the historical clinic room use, then use predictive models to predict future clinic room use based on the schedule, historical no-shows, cancellations, and short notice appointments.  
+This will allow clinic management the flexibility to re-allocate rooms to provide clinics with excess demands for that day the capacity to serve additional patients.
+
+##  Introduction
+
+1. Introduction to Children's Hospital Ambulatory Care
+2. Allocation of rooms to services (rent grid) annually
+3. Need to predict number of rooms needed by each service on a specific day.
+
+
+If we could use the medical records containing the patient demographic data and appointment information to predict the number of rooms needed for each day ahead of time, the efficiency of clinic space use will be enhanced greatly. 
+
+
+
+##  Determining number of rooms used
+
+To determine the number of rooms that the clinic actually used in any given session, the team developed a proxy based on patient appointment data from Epic in conjunction with time stamps from Cerner. The time stamp indicating when a medical assistant placed a patient in an exam room was used as an estimation of the time that the patient entered the exam room and the time stamp indicating when the provider printed the depart summary for the patient was used as an estimation of the time that the patient exited the exam room. Based on previous analysis between the depart summary time stamp and the time that the patient actually exits the room from observation in addition to room turnover time between patients, ten minutes was added to the depart summary for each patient before the next patient could enter the exam room. After classifying each patient based on the availability of all relevant data and handling each case accordingly, the data was sorted based on appointment date and appointment session. The specific clinic in which the model would be used operates on a morning (8:00AM-12:00PM) and afternoon (1:00PM-5:00PM) session basis. The goal of the algorithm was to determine the maximum amount of rooms that the clinic used during each session. The algorithm proceeded through the patients in each session chronologically and operated under the assumption that each patient would be placed in his or her own exam room (i.e. would not share an exam room with another patient). For each patient that entered the clinic, the algorithm compared the room entrance time to the time that each previous patient in the same session departed from his or her exam room and counted the number of exam rooms in use. Then for each day, the algorithm found the maximum amount of rooms in use at any time. This number was used as an approximation of the number of rooms that the clinic needed to meet their patient volume for the given session.
+
+
+##  Predicting room use two week in advance
+### Input data
+
+1.  Actual room use
+2.  Scheduled appointments and outcomes
+    i.  When appointments are made
+    ii.  Demographics
+        a. gender, age group, insurance, distance, new/return 
+    iii.  Actual time in room, Actual depart summary
+    iv. No shows
+    v.  Cancelations
+    vi. Scheduled provider time
+3.  Data manipulation
+    i. Determine known schedule two weeks before
+        a. Reverse cancellations and late scheduled appointments
+    ii.  Identify missing/wrong data (depart summary)  (Louis)
+    iii.  Distance, convert patient zip code to a zone: less than 10, 10 - 25, greater than 25
+    4.  Summarize by day and session.  Count patients in each category for each day and session.
+    
+ 
+The input data has one-year medical records from July 1st, 2016 to June 30th, 2017. The data contains when appointments are made and when are they made for. The appointment outcomes: the actual time in the room and actual depart summary, no-shows, cancelations and scheduled provider time are provided. It also includes the demographics of patients: gender, age, insurance type and whether they are new patient or return patient.  
+    
+The distance from the patient resident address to children’s hospital can be obtained by mapping the zip code of their address to the children’s hospital (15224). The distance is coded as 100000 miles If it is significantly far away. We categorize the calculated distances into three groups: near, medium and far, depending on how far a patient will travel. If the distance to children’s hospital is less than 10 miles, it will be labeled as Near; if the distance is smaller than 25 miles but larger than 10 miles, then it is Medium; if the distance is larger than 25 miles, then the distance is coded as Far.14 day look ahead rule will be applied throughout the data manipulation. The appointment cancellation will be counted as canceled if cancellation occurs two weeks or more before the appointment day. Otherwise, the cancellation will be reversed, pretending it is not canceled. Same logic apply to late scheduled appointments. If the appointment is scheduled less than two weeks before the appointment day, the appointment will not be included.   
+
+The processed data is summarized by day and session (AM and PM). Patient information in each category will be counted. For discrete attribute Age, five ranges are created to store patient records: Age 1-4, Age 5-8, Age 9-12, Age 13-18, Age else. For attribute Insurance, only TRICARE, MEDICARE, CHIP are grouped as public insurance, and other insurance types are counted as private insurance. For categorical attribute Race, three groups are created: White, Black and else. The summarized attributes after data manipulation are following: Number of patients, Age (Age 1-4, Age 5-8, Age 9-12, Age 13-18, Age else), Race (white, black and else), Female, Male, New patient, Return patient, Insurance (Private insurance, Public insurance), Distance(Far, medium and near).    
+
+
+##  Analytical methods
+
+1.  List of everything you tried
+2.  Using RMSE and R-squared, choose four methods in detail. 
+3.  For each of linear regression, linear regression with selected variables, lasso, gradient boosting
+    i. Cross validation used to tune and train models
+    ii. Further evaluation on tuned model to determine best parameters (e.g. number of variables to include in model)
+4.  Identify best method.
+    i. Distribution of prediction errors
+    ii. Analysis of quantile predictions (50th, 75th, 90th, 95th percentiles)
+    
+    
+```{r,echo=FALSE,warning=FALSE,message=FALSE}
+library(lubridate)
+library(readxl)
+library(readr)
+library(knitr)
+
+real_room<-read.csv(file.path(datadirectory,"staffed.csv"))
+#load the full patient data 
+datafile2<-"Neurology FY17.xlsx"
+observed.data<- read_excel(file.path(datadirectory, datafile2))
+
+
+
+```
+
+
+
+```{r,echo=FALSE}
+
+#After looking at data, extract the useful information
+extract_data<-observed.data[c("Appt Date","Day of Week", "Appt Length","Morning/Afternoon", "Age of Date of Appt", "Race","Pat Sex","City","State" ,"Zip Code","Primary Payor","Secondary Payor","Appt Type","Made On Date")]
+
+
+#Appointment types of "Service", "Research", "Phone Appt" are excluded.
+extract_data[,-c(1,3)]<-lapply(extract_data[,-c(1,3)],as.factor)
+
+
+#extract_data$`Age of Date of Appt`=as.numeric(extract_data$`Age of Date of Appt`)
+
+extract_data<-extract_data[(extract_data$`Appt Type`!="4879 - RESEARCH"
+                            &extract_data$`Appt Type`!= "5894 - PHONE APPT" &
+                              extract_data$`Appt Type`!="4670 - SERVICE"),]
+#drop the unused levels
+levels(extract_data$`Appt Type`)=droplevels(extract_data$`Appt Type`)
+
+
+
+```
+
+
+
+
+creat 14 dayas time window to make prediction
+only the appointment made before 7days are taken into consideration
+```{r,echo=FALSE}
+
+
+extract_data$`Appt Date`<-ymd(as.character((extract_data$`Appt Date`)))
+
+extract_data$`Made On Date`<-ymd(as.character(extract_data$`Made On Date`))
+
+cleaned_data<-extract_data
+```
+
+
+
+##Parametrze here 
+```{r,echo=FALSE}
+time_window_Data<-data.frame()
+extract_data<-extract_data[-6560,]
+for (i in 1:nrow(extract_data)){
+  #two weeks ahead #para 
+  if (extract_data$`Appt Date`[i]-extract_data$`Made On Date`[i]>=7){  #Parametrize here. currently for 7 day Look ahead model
+    #colnames(time_window_Data)<-colnames(extract_data)
+    time_window_Data<-rbind(extract_data[i,],time_window_Data)
+  }else{
+    time_window_Data<-time_window_Data
+  }
+  
+}
+
+extract_data<-time_window_Data
+
+#insurance type grouping
+#1--public:tricare,chip,medicare
+#2--private:everything else
+extract_data$Insurance<-"Private Insurance"
+extract_data$Insurance[grep("TRICARE",extract_data$`Primary Payor`)]<-"Public Insurance"
+extract_data$Insurance[grep("MEDICARE",extract_data$`Primary Payor`)]<-"Public Insurance"
+extract_data$Insurance[grep("CHIP",extract_data$`Primary Payor`)]<-"Public Insurance"
+extract_data$Insurance<-as.factor(extract_data$Insurance)
+
+```
+
+
+import the distance matrix made from zipocde
+```{r,echo=FALSE}
+my_distance<-read.csv(file.path(datadirectory,"swpazctadistance.csv"))
+colnames(my_distance)=my_distance[1,]
+rownames(my_distance)=my_distance[,2]
+my_distance<-my_distance[-1,-1]
+```
+
+
+```{r,echo=FALSE,message=FALSE}
+#chp zipcode 15224
+#which(row.names(my_distance)==15224)
+#82
+chp_distance<-data.frame(my_distance[,c(1,83)])
+colnames(chp_distance)<-c("Zip Code","chp_distance")
+```
+
+
+
+```{r,echo=FALSE,message=FALSE}
+#Distance mapping by zipcode:chp zipcode 15224
+#Match the patient distance to zip code 15224
+extract_data<-merge(extract_data,chp_distance,by=c("Zip Code"="Zip Code"))
+
+
+extract_data<-extract_data[,c(2:16,1)]
+#summary(extract_data$chp_distance)
+# group by distance
+extract_data$Dsiatnce_index<-ifelse(extract_data$chp_distance<10,"Near",ifelse(extract_data$chp_distance>25,"Far","Medium"))
+extract_data$Dsiatnce_index<-as.factor(extract_data$Dsiatnce_index)
+#If the travailing distance is less than 10 miles, it is in range "Near"; if the traveling distance is above 40 miles, then it is grouped as "Far"; Anything fall between is "Medium" distance.
+```
+
+
+
+```{r,echo=FALSE,message=FALSE}
+#aggregate the data
+#Am data
+am<-extract_data[extract_data$`Morning/Afternoon`=="AM - MORNING",]
+#pm
+pm<-extract_data[extract_data$`Morning/Afternoon`=="PM - AFTERNOON",]
+
+#split the data
+split_am_data<-split(am,am$`Appt Date`)
+split_pm_data<-split(pm,pm$`Appt Date`)
+total_apt_length_am<-sapply(split_am_data,
+                            function(x)sum(x[3]))
+total_apt_length_pm<-sapply(split_pm_data,
+                            function(x)sum(x[3]))
+
+am_age<-lapply(split_am_data,
+                            function(x)table(x[5]))
+
+pm_age<-lapply(split_pm_data,
+                            function(x)table(x[5]))
+
+
+
+race_am<-lapply(split_am_data,
+                            function(x)table(x[6]))
+
+race_pm<-lapply(split_pm_data,
+                            function(x)table(x[6]))
+
+gender_am<-lapply(split_am_data,
+                            function(x)table(x[7]))
+gender_pm<-lapply(split_pm_data,
+                            function(x)table(x[7]))
+
+
+insurance_am<-lapply(split_am_data,
+                            function(x)table(x[14]))
+
+insurance_pm<-lapply(split_pm_data,
+                            function(x)table(x[14]))
+
+patient_type_am<-lapply(split_am_data,
+                            function(x)table(x[12]))
+patient_type_pm<-lapply(split_pm_data,function(x)table(x[12]))
+
+
+distance_am<-lapply(split_am_data,
+                            function(x)table(x[17]))
+distance_pm<-lapply(split_pm_data,function(x)table(x[17]))
+
+
+```
+
+
+
+
+```{r,echo=FALSE}
+#Group data into specific range
+#age
+Age1to4<-list()
+Age5to8<-list()
+Age9to12<-list()
+Age13to18<-list()
+Age_else<-list()
+for(i in 1:255){
+  #am_age[[i]]<-sort(am_age[[i]])
+  am_age[[i]]<-am_age[[i]][order(as.numeric(names(am_age[[i]])))]
+  Age1to4[i]<-sum(am_age[[i]][1:5])
+  Age5to8[i]<-sum(am_age[[i]][6:9])
+  Age9to12[i]<-sum(am_age[[i]][10:13])
+  Age13to18[i]<-sum(am_age[[i]][14:19])
+  Age_else[i]<-sum(am_age[[i]][20:51])
+}
+
+
+Age_data<-data.frame(Age1to4=unlist(Age1to4),Age5to8=unlist(Age5to8),
+                     Age9to12=unlist(Age9to12),Age13to18=unlist(Age13to18),Age_else=unlist(Age_else))
+
+
+
+Age_data$APT_DAY<-paste(names(am_age[1:nrow(Age_data)]),"AM")
+Age_data<-Age_data[,c(6,1:5)]
+
+#race
+Race_white<-list()
+Race_black<-list()
+Race_other<-list()
+
+
+for(i in 1:255){
+  Race_white[i]<-sum(race_am[[i]][15])
+  Race_black[i]<-sum(race_am[[i]][3])
+  Race_other[i]<-sum(race_am[[i]][c(1:2,4:14)])
+}
+
+Race_data<-data.frame(Race_white=unlist(Race_white),Race_black=unlist(Race_black),Race_other=unlist(Race_other))
+Race_data$APT_DAY<-paste(names(race_am[1:nrow(Race_data)]),"AM")
+
+
+
+#gender, apt length, total number of patients, patient type
+new_cat<-data.frame()
+for (i in 1:255){
+ update<-c(total_apt_length_am[[i]],nrow(split_am_data[[i]]),gender_am[[i]], patient_type_am[[i]],insurance_am[[i]],distance_am[[i]])
+  new_cat<-rbind(new_cat,update)
+}
+new_cat<-new_cat[,c(1:6,11:15)]
+colnames(new_cat)<-c("Total apt length","Total number of patients","Female","Male","New Patient","Return Patient","Private Insurance","Public Insurance","Far","Medium","Near")
+new_cat$APT_DAY=paste(names(gender_am[1:nrow(new_cat)]),"AM")
+
+
+#Combine all data into one
+one<-merge(Age_data,Race_data,by=c("APT_DAY"="APT_DAY"))
+
+am_data<-merge(one,new_cat,by=c("APT_DAY"="APT_DAY"))
+```
+
+
+
+```{r,echo=FALSE}
+
+Age1to4<-list()
+Age5to8<-list()
+Age9to12<-list()
+Age13to18<-list()
+Age_else<-list()
+for(i in 1:250){
+  pm_age[[i]]<-pm_age[[i]][order(as.numeric(names(pm_age[[i]])))]
+  Age1to4[i]<-sum(pm_age[[i]][1:5])
+  Age5to8[i]<-sum(pm_age[[i]][6:9])
+  Age9to12[i]<-sum(pm_age[[i]][10:13])
+  Age13to18[i]<-sum(pm_age[[i]][14:19])
+  Age_else[i]<-sum(pm_age[[i]][20:51])
+}
+
+
+Age_data_2<-data.frame(Age1to4=unlist(Age1to4),Age5to8=unlist(Age5to8),
+                     Age9to12=unlist(Age9to12),Age13to18=unlist(Age13to18),Age_else=unlist(Age_else))
+
+
+
+Age_data_2$APT_DAY<-paste(names(pm_age[1:nrow(Age_data_2)]),"PM")
+Age_data_2<-Age_data_2[,c(6,1:5)]
+
+#race
+Race_white<-list()
+Race_black<-list()
+Race_other<-list()
+
+
+for(i in 1:250){
+  Race_white[i]<-sum(race_pm[[i]][15])
+  Race_black[i]<-sum(race_pm[[i]][3])
+  Race_other[i]<-sum(race_pm[[i]][c(1:2,4:14)])
+}
+
+Race_data<-data.frame(Race_white=unlist(Race_white),Race_black=unlist(Race_black),Race_other=unlist(Race_other))
+Race_data$APT_DAY<-paste(names(race_pm[1:nrow(Race_data)]),"PM")
+
+
+
+#gender, apt length, total number of patients, patient type
+new_cat_2<-data.frame()
+for (i in 1:250){
+ update<-c(total_apt_length_pm[[i]],nrow(split_pm_data[[i]]),gender_pm[[i]], patient_type_pm[[i]],insurance_pm[[i]],distance_pm[[i]])
+  new_cat_2<-rbind(new_cat_2,update)
+}
+new_cat_2<-new_cat_2[,c(1:6,11:15)]
+colnames(new_cat_2)<-c("Total apt length","Total number of patients","Female","Male","New Patient","Return Patient","Private Insurance","Public Insurance","Far","Medium","Near")
+new_cat_2$APT_DAY=paste(names(gender_pm[1:250]),"PM")
+
+
+#Combine all data into one
+TWO<-merge(Age_data_2,Race_data,by=c("APT_DAY"="APT_DAY"))
+
+pm_data<-merge(TWO,new_cat_2,by=c("APT_DAY"="APT_DAY"))
+#combine am and pm data
+new_data<-rbind(am_data,pm_data)
+
+```
+
+Match the data with staffed rooms
+```{r,echo=FALSE}
+real_room<-real_room[,-1]
+colnames(real_room)[2]<-"APT_DAY"
+
+```
+
+
+#sep (",") added in aggregate data 
+```{r,echo=FALSE}
+real_room$APT_session<-as.factor(unlist(lapply(as.character(real_room$APT_DAY),
+                        function(x){strsplit(x," ")[[1]][[2]]
+  
+})))
+real_room$APT_DAY<-unlist(lapply(as.character(real_room$APT_DAY),
+                        function(x){ paste(strsplit(x," ")[[1]][[1]],
+                                           strsplit(x," ")[[1]][[2]])
+  
+}))
+
+
+real_room$Day_of_Week<-wday(unlist(lapply(as.character(real_room$APT_DAY),
+                        function(x){strsplit(x," ")[[1]][1]
+  
+})))
+
+colnames(real_room)[1]<-"Staffed.Rooms"
+
+#new_data<-new_data[,-nrow(new_data)]
+aggregate_data<-merge(real_room,new_data,by=c("APT_DAY"="APT_DAY"),sep=",")
+#reorder the order of columns so the target is at the very front
+
+aggregate_data<-aggregate_data[,-4]
+#aggregate_data$day_of_week<-wday(aggregate_data$APT_DAY)
+  
+rownames(aggregate_data)=aggregate_data$APT_DAY
+
+aggregate_data<-aggregate_data[,-c(1,4)]
+#remove the random predictors
+
+aggregate_data<-aggregate_data[,-c(3,4,5)]
+
+```
+
+
+
+#Derived from Algorithm for Staffed Room Estimation
+```{r,echo=FALSE}
+#get the scheduled rooms:by using kim's method to get the number of scheduled rooms and then use it as one of predictor
+#refering to kim's analysis on the conditional expected length of each apt 
+apt<-data.frame("apt length"=c(20,30,40,45,60),meanapt=c(39,56,46,75,68),stedv=c(25,32,27,36,32))
+```
+
+
+```{r,echo=FALSE}
+rooms<-maxrooms.df[,c(1,2)]
+rooms$APT_DAY<-unlist(lapply(as.character(rooms$Session),
+                        function(x){ paste(strsplit(x," ")[[1]][[1]],
+                                           strsplit(x," ")[[1]][[2]])
+  
+}))
+
+
+rooms<-rooms[,-2]
+colnames(rooms)[1]<-"SchduleRoom"
+#Merge two dataset
+aggregate_data$APT_DAY<-rownames(aggregate_data)
+aggregate_data<-merge(aggregate_data,rooms,by=c("APT_DAT"="APT_DAY"))
+rownames(aggregate_data)<-aggregate_data$APT_DAY
+aggregate_data<-aggregate_data[,-1]
+
+```
+
+
+```{r,echo=FALSE,message=FALSE}
+library(caret)
+
+set.seed(1)
+control<-trainControl(method="cv",number=10)
+
+Metric <- "RMSE"
+set.seed(1)
+random_index<-sample(1:nrow(aggregate_data),(nrow(aggregate_data)*0.8))
+
+mytraining<-aggregate_data[random_index,]
+mytesting<-aggregate_data[-random_index,]
+plot(x=mytraining$Staffed.Rooms,y=mytraining$SchduleRoom,main="Staffed rooms vs schedule rooms ",xlab="Number of staffed rooms",ylab="Number of schedule rooms")
+
+
+```
+
+
+
+Data transformation:
+Before fitting any models, I checked the distribution of target variable-number of staffed rooms to see if data transformation is needed to create a better model. The density plot of target variable shows that the distribution is roughly symmetric, thus transformation to remove skewness is not necessary. 
+```{r,echo=FALSE,message=FALSE}
+#data transformation
+plot(density(mytraining$Staffed.Rooms),main="Staffed rooms")
+```
+
+
+To obtain more accurate model performance measure on the unseen data, I randomly held back 80% of data as the training set to train the models and the rest 20% as a validation set. In training set, the resampling technique for estimating the model performance is K-fold cross-validation. Because the size of the training set is limited, the K is set to be 5. The 5-fold cross-validation was used to assess the performance of the regression models and tune the models fitted by the training data. The quantitative measures of the model performance are the root mean squared error and R-squared. The root mean square error shows how far the model residuals are from zero. The R-squared value is interpreted as the portion of variability explained by the model. In our case, it is possible that the R squared value is very high and the root mean squared error is also high. For example, model A gives 0.9 R-Squared value, and root mean square error as 3 and R-squared value of model B is 0.8 and root mean square error is 2. We would prefer Model B because we because we want to predict the number of rooms actually will be using and the R squared value measures the correlation not predictive accuracy, so relying solely on the R squared value is not sufficient approach and can lead to worse model fitting.  
+The linear algorithms I have tried are linear regression, generalized linear regression and regularized linear regression. The nonlinear regression algorithms include support vector machine nearest neighbor, ensemble methods (random forests and stochastic gradient boosting). Feature selection was done by embedded approach-regularized regression (lasso, rigged regression, elastic net). 
+
+
+
+Generalized Linear Model 
+Testing from GLM (post feature selection) - also remove highly correlated variables while 
+considering 
+```{r}
+set.seed(1)
+model_glmfeature <- train(Staffed.Rooms~ Number.Patients + SchduleRoom + Day_of_Week + Age_else + Age5to8 , data=mytraining, method="glm",metric=Metric, trControl=control)
+final_glmfeat<-predict(model_glmfeature,mytesting)
+final_error_feat<-sqrt(mean((final_glmfeat-mytesting$Staffed.Rooms)^2))
+final_error_feat
+
+```
+
+
+
+```{r}
+set.seed(1)
+x <-predict(model_glmfeature,mytesting)
+y <-mytesting$Staffed.Rooms
+x_name <- "Predicted"
+y_name <- "Actual"
+
+scatter_df <- data.frame(x,y)
+names(scatter_df) <- c(x_name,y_name)
+
+ggplot(scatter_df, aes(x=Predicted, y=Actual)) + 
+  geom_point()+ labs(title="Predicted Vs Actual Staffed Rooms For 7 Day Look Ahead With GLM") +
+  labs(x="Predicted Staffed Rooms", y="Actual Staffed Rooms") +
+  geom_smooth(method=lm,se=FALSE) + theme_bw()
+
+```
+
+
+Final Predictions and export to csv
+```{r}
+predicted_staffedrooms<-data.frame(final_glmfeat)
+write.csv(predicted_staffedrooms, file = "predicted_staffed.csv",row.names=TRUE)
+```
+
+predictions for 7 day lookahead
+```{r}
+final_glmfeat
+
+```
+
