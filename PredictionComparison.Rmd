@@ -1,0 +1,499 @@
+---
+title: "rent comparison"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+
+#import ardata from Ambulatory/Neurology/Data from CHP in box
+
+
+The 4 V's
+Volume- The dataset "ardata" has 504 obsevations with 15 variables.
+
+Velocity-Every row corresponds to a single session (AM or PM) of that perticular date. The    entire dataset contains 251 afternoon sessions and 253 morning sessions. 
+Every new input of a  morning and afternoon session of the same date will add another day to the data.Currently, the data has 252 days.
+
+Variety- The dataset has been derived from the following sources:
+         "Neurology FY17",Location: Box/Ambulatory/Neurology/Data From CHP/Cadence Data
+         "Neurology Rent Grid", Location: Box/Ambulatory/Neurology/Data From CHP/Cadence Data
+         Information in categories of – Number of Rooms, Day of the Week, Date etc 
+Veracity- Sessions not sequenced by  Date and should be sorted before analyzing trends with 
+          respect to Appointment Date.
+          
+          
+
+```{r}
+library(lubridate)
+library(scales)
+library(date)
+library(dplyr)
+library(magrittr)
+library(ggplot2)
+# work_dir <- "E:/Box Sync/Ambulatory/Neurology/Data from CHP"
+work_dir <- "C:/Users/Pranay/Desktop/Hospital Rooms"
+#work_dir <- "E:/Box Sync/Ambulatory/Neurology/Data from CHP"
+# work_dir <- "C:/Users/Pranay/Desktop/Hospital Rooms"
+#setwd(work_dir)
+
+ardata<-read.csv(file.path(work_dir, "ardata.csv"))
+colnames(ardata)[which(names(ardata) == "Morning.Afternoon")] <- 'Morning/Afternoon'
+colnames(ardata)[which(names(ardata) == "Rented.Rooms.1")] <- 'Rented Rooms'
+colnames(ardata)[which(names(ardata) == "Day.of.Week")] <- 'Day of Week'
+
+ardata$Staffed.Rented.Diff<-ardata$Staffed.Rooms - ardata$Rented.Rooms
+ardata$Date<- ymd(ardata$Date, tz = "America/New_York")
+ardata$`Rented Rooms`<-NULL
+
+
+```
+
+```{r}
+
+#ardata <- ardata %>%
+  #mutate(`Day of Week`=ordered(`Day of Week`, levels= c("Sun", "Mon", 
+    #"Tue", "Wed", "Thu", "Fri", "Sat")))
+#arbysession <- ardata %>%
+  #mutate(releasedrooms = ifelse(Rented.Staffed.Diff >=3, 1, 0),
+         #needrooms = ifelse(Staffed.Rented.Diff>=1, 1, 0)) %>%
+ #group_by(`Day of Week`, `Morning/Afternoon`) %>%
+ #summarize(numsessions=n(),
+           #releasedroomsessions=sum(releasedrooms),
+           #needroomsessions=sum(needrooms)) %>%
+ #mutate(percent.released.sessions=100*releasedroomsessions/numsessions,
+        #percent.need.sessions=100*needroomsessions/numsessions)
+  
+```
+
+
+Summary by Session:
+
+Steps:
+1. Mutate an Indicator Function for every Session based on the differences between Rented and 
+  Staffed Rooms-
+   Release Room Indicator-For every session which has a difference between Rented and Staffed 
+                          Rooms greater than or equal to 3, output 1 for every such session and 
+                          0 otherwise.
+   Need Room Indicator - For every session which has a difference between Staffed and Rented 
+                          Rooms greater than or equal to 2, output 1 for every session and 0 
+                          otherwise.
+2.Group the dataset by Day of the Week and AM/PM Session.
+3.Count the total number of Sessions for every group.
+4.Count the total number of Sessions where Rented Rooms need to be released by summing the        entire column having the Release Room Indicator.
+5.Count the total number of Sessions where Rented Rooms are needed by summing the entire 
+  column having the Need Room Indicator.
+6. Calculate the percent of Rooms Released by dividing the Total number of Sesssions where
+   Rooms are released by the Total number of Sessions.
+7. Calculate the percent of Rooms Needed by dividing the Total number of Sesssions where
+   Rooms are needed by the Total number of Sessions.
+
+Group By Day of Week and AM/PM
+```{r}
+ardata <- ardata %>%
+  mutate(`Day of Week`=ordered(`Day of Week`, levels= c("Sun", "Mon", 
+    "Tue", "Wed", "Thu", "Fri", "Sat")))
+arbysession <- ardata %>%
+  mutate(releasedroomsIndicator = ifelse(Rented.Staffed.Diff >=3, 1, 0),
+         needroomsIndicator = ifelse(Staffed.Rented.Diff>=2, 1, 0)) %>%
+ group_by(`Day of Week`, `Morning/Afternoon`) %>%
+ summarize(numsessions=n(),
+           ReleaseRoomSessions=sum(releasedroomsIndicator),
+           NeedRoomSessions=sum(needroomsIndicator)) %>%
+ mutate(Percent.Released.Sessions=round(100*ReleaseRoomSessions/numsessions),
+        Percent.Need.Sessions=round(100*NeedRoomSessions/numsessions))
+
+write.table(arbysession, file = "BySess.csv", sep = ",", col.names = NA,
+            qmethod = "double")
+
+```
+
+Barplot of rooms needed/released by session
+```{r}
+arbysession_ug<-ardata %>%
+   mutate(releasedroomsIndicator = ifelse(Rented.Staffed.Diff >=3, 1, 0),
+         needroomsIndicator = ifelse(Staffed.Rented.Diff>=2, 1, 0)) %>%
+  summarize(numsessions=n(),
+           ReleaseRoomSessions=sum(releasedroomsIndicator),
+           NeedRoomSessions=sum(needroomsIndicator))
+  
+df <- data.frame(indicate=c( "Release Released", "Rooms Requested"),
+                len=c(arbysession_ug$ReleaseRoomSessions,arbysession_ug$NeedRoomSessions))
+
+
+ggplot(data=df, aes(x=indicate, y=len)) +
+  geom_bar(stat="identity")  + scale_y_continuous(breaks= pretty_breaks()) + theme_bw()  + labs(title="Rooms Requested/Released By Total Sessions") + labs(x="Scenario", y="Number of Sessions") 
+
+
+#ggplot(data=arbysessionroom_release, aes(x=Rented.Staffed.Diff, y=numsessions)) +
+  #geom_bar(stat="identity",fill="steelblue") + scale_x_continuous(breaks = 1:20) + scale_y_continuous(breaks= pretty_breaks()) + theme_bw()  + labs(title=" Difference between Rented and Staffed Rooms by Session") + labs(x="Difference = Rented Rooms - Staffed Rooms", y="Number of Sessions") 
+  
+```
+
+
+Barplot of Differences between Room by session
+```{r}
+arbysessionroom_release<-ardata %>%
+  filter(Rented.Staffed.Diff>0) %>%
+    #mutate(releasedroomsIndicator = ifelse(Rented.Staffed.Diff >=3, 1, 0)) %>%
+  group_by(Rented.Staffed.Diff) %>%
+   summarize(numsessions=n())
+     #ReleaseRoomSessions=sum(releasedroomsIndicator)) #%>%
+  #filter(ReleaseRoomSessions>0)
+  
+
+arbysessionroom_need<-ardata %>%
+  filter(Staffed.Rented.Diff>0) %>%
+    #mutate(needroomsIndicator = ifelse(Staffed.Rented.Diff>=2, 1, 0)) %>%
+  group_by(Staffed.Rented.Diff) %>%
+   summarize(numsessions=n())
+     #NeedRoomSessions=sum(needroomsIndicator)) #%>%
+  #filter(NeedRoomSessions>0)
+
+
+ggplot(data=arbysessionroom_release, aes(x=Rented.Staffed.Diff, y=numsessions)) +
+  geom_bar(stat="identity",fill="steelblue") + scale_x_continuous(breaks = 1:20) + scale_y_continuous(breaks= pretty_breaks()) + theme_bw()  + labs(title=" Difference between Rented and Staffed Rooms by Total Sessions") + labs(x="Difference = Rented Rooms - Staffed Rooms", y="Number of Sessions") 
+
+
+ggplot(data=arbysessionroom_need, aes(x=Staffed.Rented.Diff, y=numsessions)) +
+  geom_bar(stat="identity",fill="orange") + scale_x_continuous(breaks = 1:20) + scale_y_continuous(breaks= pretty_breaks()) + theme_bw() + labs(title=" Difference between Staffed and Rented Rooms by Total Sessions") + labs(x="Difference = Staffed Rooms - Rented Rooms", y="Number of Sessions") 
+
+
+
+#ardata <- ardata %>%
+   #mutate(Date=ordered(Date),Date=as.Date(Date))
+#mon_am<- ardata %>%
+  #filter(`Morning/Afternoon`=="AM",`Day of Week`=="Mon") 
+#ggplot(mon_am, aes(Rented.Staffed.Diff)) +
+    #geom_histogram(binwidth=1, colour="black", fill="blue") + theme_bw() + scale_x_continuous(breaks = -6:6) + theme_bw() + labs(title=" Difference between Rented and Staffed Rooms on Monday Mornings") +
+  #labs(x="Difference = Rented Rooms - Staffed Rooms", y="Number of Sessions") + scale_y_continuous(breaks= pretty_breaks()) +
+  #geom_vline(xintercept = 0, linetype="dashed", color = "black", size=1.5) 
+  #mon_am$Date<-as.Date(mon_am$Date)
+#ggplot(data=mon_am, aes(x=Date)) +                 
+  #geom_line(aes(y=Staffed.Rooms, colour="Staffed.Rooms")) +  
+  #geom_line(aes(y=Rented.Rooms, colour="Rented.Rooms")) +
+  #labs(title="Trend for Rented and Staffed Rooms on Monday Mornings") +
+  #labs(x="Date", y="Number of Rooms") + theme_bw() + scale_y_continuous(breaks= 0:14) +
+   #scale_colour_manual("", 
+                      #breaks = c("Staffed.Rooms", "Rented.Rooms"),
+                      #values = c("Staffed.Rooms"="blue", "Rented.Rooms"="violet")) +xlab(" ") + scale_x_date(date_breaks = "1 month",labels = date_format("%b%y")) 
+
+
+
+
+
+```
+
+
+Overall Histogram 
+```{r}
+#ardata <- ardata %>%
+   #mutate(Date=ordered(Date),Date=as.Date(Date))
+#rent_staff<- ardata %>%
+ggplot(ardata, aes(Rented.Staffed.Diff)) +
+    geom_histogram(binwidth=1, colour="black", fill="brown") + theme_bw() + scale_x_continuous(breaks = -10:10) + theme_bw() + labs(title=" Difference between Rented and Staffed Rooms") +
+  labs(x="Difference = Rented Rooms - Staffed Rooms", y="Number of Sessions") + scale_y_continuous(breaks= pretty_breaks()) +
+  geom_vline(xintercept = 0, linetype="dashed", color = "black", size=1.5) 
+
+
+
+
+```
+
+
+
+
+
+
+
+
+Summary By Rooms:
+
+Procedure:
+1.Mutate number of Rented Rooms to release and in need based on the differences between Rented 
+  and Staffed Rooms- 
+  Released Rooms- If the difference between Rented and Rooms and Staffed Rooms is greater than
+                   or equal to 3, Subtract 2 from the difference and the resultant would be the
+                   number of Rented Rooms to be released.
+  Rooms Needed- If the difference between Staffed Rooms and Rented Rooms is greater than or 
+                equal to 2, the number of rooms needed would be the difference minus 1.
+2. Group the dataset by Day of Week and AM/PM Session.
+3. Count the total number of Staffed and Rented Rooms for every group.
+4. Calculate the total number of Rooms to be Release for every group by summing the 'Released
+   Rooms' for every group.
+5. Calculate the total number of Rooms needed for every group by summing the
+   Rooms Needed' for every group.
+6.Calculate the percent of the rooms to be released by dividing the Total Number of Released
+  Rooms by the Total number of Rented Rooms.
+7. Calculate the total number of rooms needed by dividing the Total number of Rooms Needed 
+  by the Total number of Rented Rooms. 
+
+```{r}
+ardata <- ardata %>%
+  mutate(`Day of Week`=ordered(`Day of Week`, levels= c("Sun", "Mon", 
+    "Tue", "Wed", "Thu", "Fri", "Sat")))
+arbyrooms<- ardata %>%
+  mutate(releasedrooms=ifelse(Rented.Staffed.Diff>=3,Rented.Staffed.Diff-2,0),
+         needrooms=ifelse(Staffed.Rented.Diff>=2,Staffed.Rented.Diff-1,0)) %>%
+ group_by(`Day of Week`, `Morning/Afternoon`) %>%
+ summarize(TotalStaffedRooms=sum(Staffed.Rooms),
+           TotalRentedRooms=sum(Rented.Rooms),
+           TotalRoomsRelease=sum(releasedrooms),
+           TotalRoomsNeeded=sum(needrooms)) %>%
+ mutate(Percent.Released.Rooms=round(100*TotalRoomsRelease/TotalRentedRooms),
+        Percent.Need.Rooms =round(100*TotalRoomsNeeded/TotalRentedRooms),
+        Diff.Rented.Requested=TotalRentedRooms-TotalRoomsNeeded)
+
+write.table(arbyrooms, file = "Byroom.csv", sep = ",", col.names = NA,
+            qmethod = "double")
+
+```
+
+
+
+
+
+
+
+
+1. Monday: Mornings and Afternoons
+
+Plot 1: Histogram distribution showing difference between Rented and Staffed Rooms on Monday            Mornings.
+Plot 2: Trend for Staffed Rooms and Rented Rooms on Monday Mornings.
+Plot 3:Histogram distribution showing difference between Rented and Staffed Rooms on Monday            Afternoons.
+Plot 4:Trend for Staffed Rooms and Rented Rooms on Monday Afternoons.
+```{r}
+#Morning
+ardata <- ardata %>%
+   mutate(Date=ordered(Date),Date=as.Date(Date))
+mon_am<- ardata %>%
+  filter(`Morning/Afternoon`=="AM",`Day of Week`=="Mon") 
+ggplot(mon_am, aes(Rented.Staffed.Diff)) +
+    geom_histogram(binwidth=1, colour="black", fill="blue") + theme_bw() + scale_x_continuous(breaks = -6:6) + theme_bw() + labs(title=" Difference between Rented and Staffed Rooms on Monday Mornings") +
+  labs(x="Difference = Rented Rooms - Staffed Rooms", y="Number of Sessions") + scale_y_continuous(breaks= pretty_breaks()) +
+  geom_vline(xintercept = 0, linetype="dashed", color = "black", size=1.5) 
+  #mon_am$Date<-as.Date(mon_am$Date)
+ggplot(data=mon_am, aes(x=Date)) +                 
+  geom_line(aes(y=Staffed.Rooms, colour="Staffed.Rooms")) +  
+  geom_line(aes(y=Rented.Rooms, colour="Rented.Rooms")) +
+  labs(title="Trend for Rented and Staffed Rooms on Monday Mornings") +
+  labs(x="Date", y="Number of Rooms") + theme_bw() + scale_y_continuous(breaks= 0:14) +
+   scale_colour_manual("", 
+                      breaks = c("Staffed.Rooms", "Rented.Rooms"),
+                      values = c("Staffed.Rooms"="blue", "Rented.Rooms"="violet")) +xlab(" ") + scale_x_date(date_breaks = "1 month",labels = date_format("%b%y")) 
+
+
+#Afternoon
+mon_pm<- ardata %>%
+  filter(`Morning/Afternoon`=="PM",`Day of Week`=="Mon") 
+ggplot(mon_pm, aes(x=Rented.Staffed.Diff)) +
+    geom_histogram(binwidth=1, colour="black", fill="red") + theme_bw() + scale_x_continuous(breaks = -6:6) + theme_bw() + labs(title=" Difference between Rented and Staffed Rooms on Monday Afternoons") +
+  labs(x="Difference = Rented Rooms - Staffed Rooms", y="Number of Sessions") + scale_y_continuous(breaks= pretty_breaks()) + 
+  geom_vline(xintercept = 0, linetype="dashed", color = "black", size=1.5)
+ggplot(data=mon_pm, aes(x=Date)) +                 
+  geom_line(aes(y=Staffed.Rooms, colour="Staffed.Rooms")) +  
+  geom_line(aes(y=Rented.Rooms, colour="Rented.Rooms")) +
+  labs(title="Trend for Rented and Staffed Rooms on Monday Afternoons") +
+  labs(x="Date", y="Number of Rooms") + theme_bw() + scale_y_continuous(breaks= 0:10) +
+   scale_colour_manual("", 
+                      breaks = c("Staffed.Rooms", "Rented.Rooms"),
+                      values = c("Staffed.Rooms"="red", "Rented.Rooms"="green")) +xlab(" ")  + scale_x_date(date_breaks = "1 month",labels = date_format("%b%y"))
+
+
+```
+
+2. Tuesday: Mornings and Afternoons
+
+Plot 1: Histogram distribution showing difference between Rented and Staffed Rooms on Tuesday           Mornings.
+Plot 2: Trend for Staffed Rooms and Rented Rooms on Tuesday Mornings.
+Plot 3:Histogram distribution showing difference between Rented and Staffed Rooms on Tuesday            Afternoons.
+Plot 4:Trend for Staffed Rooms and Rented Rooms on Tuesday Afternoons.
+```{r}
+#Morning
+tue_am<- ardata %>%
+  filter(`Morning/Afternoon`=="AM",`Day of Week`=="Tue") 
+ggplot(tue_am, aes(x=Rented.Staffed.Diff)) +
+    geom_histogram(binwidth=1, colour="black", fill="blue") + theme_bw() + scale_x_continuous(breaks = -8:8) + theme_bw() + labs(title=" Difference between Rented and Staffed Rooms on Tuesday Mornings") +
+  labs(x="Difference = Rented Rooms - Staffed Rooms", y="Number of Sessions") + scale_y_continuous(breaks= pretty_breaks()) + 
+  geom_vline(xintercept = 0, linetype="dashed", color = "black", size=1.5)
+ggplot(data=tue_am, aes(x=Date)) +                 
+  geom_line(aes(y=Staffed.Rooms, colour="Staffed.Rooms")) +  
+  geom_line(aes(y=Rented.Rooms, colour="Rented.Rooms")) +
+  labs(title="Trend for Rented and Staffed Rooms on Tuesday Mornings") +
+  labs(x="Date", y="Number of Rooms") + theme_bw() + scale_y_continuous(breaks= 0:20) +
+   scale_colour_manual("", 
+                      breaks = c("Staffed.Rooms", "Rented.Rooms"),
+                      values = c("Staffed.Rooms"="blue", "Rented.Rooms"="violet")) +xlab(" ")  + scale_x_date(date_breaks = "1 month",labels = date_format("%b%y"))
+
+
+
+#Afternoon
+tue_pm<- ardata %>%
+  filter(`Morning/Afternoon`=="PM",`Day of Week`=="Tue") 
+ggplot(tue_pm, aes(x=Rented.Staffed.Diff)) +
+    geom_histogram(binwidth=1, colour="black", fill="red") + theme_bw() + scale_x_continuous(breaks = -6:6) + theme_bw() + labs(title=" Difference between Rented and Staffed Rooms on Tuesday Afternoons") +
+  labs(x="Difference = Rented Rooms - Staffed Rooms", y="Number of Sessions") + scale_y_continuous(breaks= pretty_breaks()) + 
+  geom_vline(xintercept = 0, linetype="dashed", color = "black", size=1.5)
+#tue_pm$Date<-as.Date(tue_pm$Date)
+ggplot(data=tue_pm, aes(x=Date)) +                 
+  geom_line(aes(y=Staffed.Rooms, colour="Staffed.Rooms")) +  
+  geom_line(aes(y=Rented.Rooms, colour="Rented.Rooms")) +
+  labs(title="Trend for Rented and Staffed Rooms on Tuesday Afternoons") +
+  labs(x="Date", y="Number of Rooms") + theme_bw() + scale_y_continuous(breaks= 0:12) +
+   scale_colour_manual("", 
+                      breaks = c("Staffed.Rooms", "Rented.Rooms"),
+                      values = c("Staffed.Rooms"="red", "Rented.Rooms"="green")) +xlab(" ")  + scale_x_date(date_breaks = "1 month",labels = date_format("%b%y"))
+
+
+```
+
+3. Wednesday: Mornings and Afternoons
+
+Plot 1: Histogram distribution showing difference between Rented and Staffed Rooms on Wednesday            Mornings.
+Plot 2: Trend for Staffed Rooms and Rented Rooms on Wednesday Mornings.
+Plot 3:Histogram distribution showing difference between Rented and Staffed Rooms on Wednesday            Afternoons.
+Plot 4:Trend for Staffed Rooms and Rented Rooms on Wednesday Afternoons.
+```{r}
+#Morning
+wed_am<- ardata %>%
+  filter(`Morning/Afternoon`=="AM",`Day of Week`=="Wed") 
+ggplot(wed_am, aes(x=Rented.Staffed.Diff)) +
+    geom_histogram(binwidth=1, colour="black", fill="blue") + theme_bw() + scale_x_continuous(breaks = -6:6) + theme_bw() + labs(title=" Difference between Rented and Staffed Rooms on Wednesday Mornings") +
+  labs(x="Difference = Rented Rooms - Staffed Rooms", y="Number of Sessions") + scale_y_continuous(breaks= pretty_breaks()) + 
+  geom_vline(xintercept = 0, linetype="dashed", color = "black", size=1.5)
+ggplot(data=wed_am, aes(x=Date)) +                 
+  geom_line(aes(y=Staffed.Rooms, colour="Staffed.Rooms")) +  
+  geom_line(aes(y=Rented.Rooms, colour="Rented.Rooms")) +
+  labs(title="Trend for Rented and Staffed Rooms on Wednesday Mornings") +
+  labs(x="Date", y="Number of Rooms") + theme_bw() + scale_y_continuous(breaks= 0:10) +
+   scale_colour_manual("", 
+                      breaks = c("Staffed.Rooms", "Rented.Rooms"),
+                      values = c("Staffed.Rooms"="blue", "Rented.Rooms"="violet")) +xlab(" ") + scale_x_date(date_breaks = "1 month",labels = date_format("%b%y"))
+
+
+#Afternoon
+wed_pm<- ardata %>%
+  filter(`Morning/Afternoon`=="PM",`Day of Week`=="Wed") 
+ggplot(wed_pm, aes(x=Rented.Staffed.Diff)) +
+    geom_histogram(binwidth=1, colour="black", fill="red") + theme_bw() + scale_x_continuous(breaks = -6:6) + theme_bw() + labs(title=" Difference between Rented and Staffed Rooms on Wednesday Afternoons") +
+  labs(x="Difference = Rented Rooms - Staffed Rooms", y="Number of Sessions") + scale_y_continuous(breaks= pretty_breaks()) + 
+  geom_vline(xintercept = 0, linetype="dashed", color = "black", size=1.5)
+ggplot(data=wed_pm, aes(x=Date)) +                 
+  geom_line(aes(y=Staffed.Rooms, colour="Staffed.Rooms")) +  
+  geom_line(aes(y=Rented.Rooms, colour="Rented.Rooms")) +
+  labs(title="Trend for Rented and Staffed Rooms on Wednesday Afternoons") +
+  labs(x="Date", y="Number of Rooms") + theme_bw() + scale_y_continuous(breaks= 0:10) +
+   scale_colour_manual("", 
+                      breaks = c("Staffed.Rooms", "Rented.Rooms"),
+                      values = c("Staffed.Rooms"="red", "Rented.Rooms"="green")) +xlab(" ")  + scale_x_date(date_breaks = "1 month",labels = date_format("%b%y"))
+
+
+```
+
+<<<<<<< HEAD
+4. Thursday: Mornings and Afternoons
+
+Plot 1: Histogram distribution showing difference between Rented and Staffed Rooms on Thursday            Mornings.
+Plot 2: Trend for Staffed Rooms and Rented Rooms on Thursday Mornings.
+Plot 3:Histogram distribution showing difference between Rented and Staffed Rooms on Thursday            Afternoons.
+Plot 4:Trend for Staffed Rooms and Rented Rooms on Thursday Afternoons.
+```{r}
+#Morning
+thur_am<- ardata %>%
+  filter(`Morning/Afternoon`=="AM",`Day of Week`=="Thu") 
+ggplot(thur_am, aes(x=Rented.Staffed.Diff)) +
+    geom_histogram(binwidth=1, colour="black", fill="blue") + theme_bw() + scale_x_continuous(breaks = -12:7) + theme_bw() + labs(title=" Difference between Rented and Staffed Rooms on Thursday Mornings") +
+  labs(x="Difference = Rented Rooms - Staffed Rooms", y="Number of Sessions") + scale_y_continuous(breaks= pretty_breaks()) + 
+  geom_vline(xintercept = 0, linetype="dashed", color = "black", size=1.5)
+ggplot(data=thur_am, aes(x=Date)) +                 
+  geom_line(aes(y=Staffed.Rooms, colour="Staffed.Rooms")) +  
+  geom_line(aes(y=Rented.Rooms, colour="Rented.Rooms")) +
+  labs(title="Trend for Rented and Staffed Rooms on Thursday Mornings") +
+  labs(x="Date", y="Number of Rooms") + theme_bw() + scale_y_continuous(breaks= 0:16) +
+   scale_colour_manual("", 
+                      breaks = c("Staffed.Rooms", "Rented.Rooms"),
+                      values = c("Staffed.Rooms"="blue", "Rented.Rooms"="violet")) +xlab(" ")  + scale_x_date(date_breaks = "1 month",labels = date_format("%b%y"))
+
+
+#AFternoon
+thur_pm<- ardata %>%
+  filter(`Morning/Afternoon`=="PM",`Day of Week`=="Thu") 
+ggplot(thur_pm, aes(x=Rented.Staffed.Diff)) +
+    geom_histogram(binwidth=1, colour="black", fill="red") + theme_bw() + scale_x_continuous(breaks = -3:7) + theme_bw() + labs(title=" Difference between Rented and Staffed Rooms on Thursday Afternoons") +
+  labs(x="Difference = Rented Rooms - Staffed Rooms", y="Number of Sessions") + scale_y_continuous(breaks= pretty_breaks()) +
+  geom_vline(xintercept = 0, linetype="dashed", color = "black", size=1.5) 
+ggplot(data=thur_pm, aes(x=Date)) +                 
+  geom_line(aes(y=Staffed.Rooms, colour="Staffed.Rooms")) +  
+  geom_line(aes(y=Rented.Rooms, colour="Rented.Rooms")) +
+  labs(title="Trend for Rented and Staffed Rooms on Thursday Afternoons") +
+  labs(x="Date", y="Number of Rooms") + theme_bw() + scale_y_continuous(breaks= 0:10) +
+   scale_colour_manual("", 
+                      breaks = c("Staffed.Rooms", "Rented.Rooms"),
+                      values = c("Staffed.Rooms"="red", "Rented.Rooms"="green")) +xlab(" ")  + scale_x_date(date_breaks = "1 month",labels = date_format("%b%y"))
+
+
+```
+
+5. Friday: Mornings and Afternoons
+
+Plot 1: Histogram distribution showing difference between Rented and Staffed Rooms on Friday            Mornings.
+Plot 2: Trend for Staffed Rooms and Rented Rooms on Friday Mornings.
+Plot 3:Histogram distribution showing difference between Rented and Staffed Rooms on Friday            Afternoons.
+Plot 4:Trend for Staffed Rooms and Rented Rooms on Friday Afternoons.
+```{r}
+#Friday Morning
+fri_am<- ardata %>%
+  filter(`Morning/Afternoon`=="AM",`Day of Week`=="Fri")
+ggplot(fri_am, aes(x=Rented.Staffed.Diff)) +
+    geom_histogram(binwidth=1, colour="black", fill="blue") + theme_bw() + scale_x_continuous(breaks = -7:11) + theme_bw() + labs(title=" Difference between Rented and Staffed Rooms on Friday Mornings") +
+  labs(x="Difference = Rented Rooms - Staffed Rooms", y="Number of Sessions") + scale_y_continuous(breaks= pretty_breaks()) +
+  geom_vline(xintercept = 0, linetype="dashed", color = "black", size=1.5)
+ggplot(data=fri_am, aes(x=Date)) +                 
+  geom_line(aes(y=Staffed.Rooms, colour="Staffed.Rooms")) +  
+  geom_line(aes(y=Rented.Rooms, colour="Rented.Rooms")) +
+  labs(title="Trend for Rented and Staffed Rooms on Friday Mornings") +
+  labs(x="Date", y="Number of Rooms") + theme_bw() + scale_y_continuous(breaks=0:18) +
+   scale_colour_manual("", 
+                      breaks = c("Staffed.Rooms", "Rented.Rooms"),
+                      values = c("Staffed.Rooms"="blue", "Rented.Rooms"="violet")) +xlab(" ")  + scale_x_date(date_breaks = "1 month",labels = date_format("%b%y"))
+
+#Friday Afternoon
+fri_pm<- ardata %>%
+  filter(`Morning/Afternoon`=="PM",`Day of Week`=="Fri")
+ggplot(fri_pm, aes(x=Rented.Staffed.Diff)) +
+    geom_histogram(binwidth=1, colour="black", fill="red") + theme_bw() + scale_x_continuous(breaks = -3:8) + theme_bw() + labs(title=" Difference between Rented and Staffed Rooms on Friday Afternoons") +
+  labs(x="Difference = Rented Rooms - Staffed Rooms", y="Number of Sessions") + scale_y_continuous(breaks= pretty_breaks()) +
+  geom_vline(xintercept = 0, linetype="dashed", color = "black", size=1.5)
+ggplot(data=fri_pm, aes(x=Date)) +                 
+  geom_line(aes(y=Staffed.Rooms, colour="Staffed.Rooms")) +  
+  geom_line(aes(y=Rented.Rooms, colour="Rented.Rooms")) +
+  labs(title="Trend for Rented and Staffed Rooms on Friday Afternoons") +
+  labs(x="Date", y="Number of Rooms") + theme_bw() + scale_y_continuous(breaks= 0:12) +
+   scale_colour_manual("", 
+                      breaks = c("Staffed.Rooms", "Rented.Rooms"),
+                      values = c("Staffed.Rooms"="red", "Rented.Rooms"="green")) +xlab(" ")  + scale_x_date(date_breaks = "1 month",labels = date_format("%b%y"))
+
+
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
