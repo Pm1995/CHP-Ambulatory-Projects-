@@ -1,28 +1,3 @@
----
-title: "rent comparison"
-output:
-  html_document: default
-  pdf_document: default
----
-
-
-#import ardata from Ambulatory/Neurology/Data from CHP in box
-
-
-The 4 V's
-Volume- The dataset "ardata" has 504 obsevations with 15 variables.
-
-Velocity-Every row corresponds to a single session (AM or PM) of that perticular date. The    entire dataset contains 251 afternoon sessions and 253 morning sessions. 
-Every new input of a  morning and afternoon session of the same date will add another day to the data.Currently, the data has 252 days.
-
-Variety- The dataset has been derived from the following sources:
-         "Neurology FY17",Location: Box/Ambulatory/Neurology/Data From CHP/Cadence Data
-         "Neurology Rent Grid", Location: Box/Ambulatory/Neurology/Data From CHP/Cadence Data
-         Information in categories of – Number of Rooms, Day of the Week, Date etc 
-Veracity- Sessions not sequenced by  Date and should be sorted before analyzing trends with 
-          respect to Appointment Date.
-          
-          
 
 ```{r}
 library(lubridate)
